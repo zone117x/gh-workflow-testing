@@ -1,0 +1,54 @@
+name: Publish standalone regtest image
+
+on:
+  workflow_dispatch:
+    inputs:
+      stacks_api_commit:
+        description: 'stacks-blockchain-api git commit'
+        required: true
+        type: string
+      stacks_blockchain_commit:
+        description: 'stacks-blockchain git commit'
+        required: true
+        type: string
+
+env:
+  API_GIT_COMMIT: ${{ inputs.stacks_api_commit }}
+  BLOCKCHAIN_GIT_COMMIT: ${{ inputs.stacks_blockchain_commit }}
+
+jobs:
+  build-push-docker:
+    needs: build-stacks-node
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create tag labels
+        run: |
+          api_short=$(head -c 7 <<< "$API_GIT_COMMIT")
+          blockchain_short=$(head -c 7 <<< "$BLOCKCHAIN_GIT_COMMIT")
+          echo "GIT_SHORTS=${api_short}-${blockchain_short}" >> $GITHUB_ENV
+      - id: meta
+        uses: docker/metadata-action@v4
+        with:
+          images: zone117x/stacks-blockchain-api-standalone-regtest
+          tags: |
+            type=raw,value=latest,enable=false
+            type=raw,value={{date 'YYYYMMDDHH'}}-${{ env.GIT_SHORTS }}
+      - uses: docker/setup-qemu-action@v2
+      - uses: docker/setup-buildx-action@v2
+      - uses: docker/login-action@v2
+        with:
+          username: zone117x
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/build-push-action@v3
+        with:
+          file: standalone-regtest.Dockerfile
+          context: https://github.com/hirosystems/stacks-blockchain-api.git#feat/stacks-2.1-standalone:docker
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=zone117x/stacks-blockchain-api-standalone-regtest
+          cache-to: type=inline
+          build-args: |
+            API_GIT_COMMIT=${{ env.API_GIT_COMMIT }}
+            BLOCKCHAIN_GIT_COMMIT=${{ env.BLOCKCHAIN_GIT_COMMIT }}
