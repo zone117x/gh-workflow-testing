@@ -133,7 +133,7 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v3
         with:
-          file: standalone-regtest.Dockerfile
+          file: docker/standalone-regtest.Dockerfile
           context: ./docker
           push: true
           platforms: linux/amd64,linux/arm64
