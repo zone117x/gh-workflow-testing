@@ -7,23 +7,107 @@ on:
         description: 'stacks-blockchain-api git commit'
         required: true
         type: string
+        default: 5d76760f2757a3b284e684b8cdcb5c2bcb04269c
       stacks_blockchain_commit:
         description: 'stacks-blockchain git commit'
         required: true
         type: string
+        default: b16e121d94306887f21c3d3ed7da1d980c5f3454
 
 env:
-  API_GIT_COMMIT: ${{ inputs.stacks_api_commit }}
-  BLOCKCHAIN_GIT_COMMIT: ${{ inputs.stacks_blockchain_commit }}
+  STACKS_API_COMMIT: ${{ inputs.stacks_api_commit }}
+  STACKS_BLOCKCHAIN_COMMIT: ${{ inputs.stacks_blockchain_commit }}
 
 jobs:
-  build-push-docker:
+  build-stacks-node:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Cache stacks-node
+        id: cache
+        uses: actions/cache@v3
+        with:
+          path: bin
+          key: cache-stacks-node-${{ env.STACKS_BLOCKCHAIN_COMMIT }}
+      - name: Install Rust - linux/amd64
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: x86_64-unknown-linux-gnu
+      - name: Install Rust - linux/arm64
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: aarch64-unknown-linux-gnu
+      - name: Install compilation tooling
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-aarch64-linux-gnu libc6-dev-arm64-cross gcc-aarch64-linux-gnu
+      - name: Fetch Stacks node repo
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          echo "$PWD"
+          mkdir stacks-blockchain-repo && cd stacks-blockchain-repo
+          git init
+          git remote add origin https://github.com/stacks-network/stacks-blockchain.git
+          git -c protocol.version=2 fetch --depth=1 origin $STACKS_BLOCKCHAIN_COMMIT
+          git reset --hard FETCH_HEAD
+      - name: Rust cache
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "stacks-blockchain-repo"
+          shared-key: rust-cache-stacks-node-${{ env.STACKS_BLOCKCHAIN_COMMIT }}
+      - name: Cargo fetch
+        if: steps.cache.outputs.cache-hit != 'true'
+        working-directory: stacks-blockchain-repo
+        run: |
+          cargo fetch --manifest-path testnet/stacks-node/Cargo.toml --target x86_64-unknown-linux-gnu --target aarch64-unknown-linux-gnu
+      - name: Build Stacks node
+        if: steps.cache.outputs.cache-hit != 'true'
+        working-directory: stacks-blockchain-repo
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: true
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
+        run: |
+          cargo build --package stacks-node --bin stacks-node --release --target x86_64-unknown-linux-gnu --target aarch64-unknown-linux-gnu
+          mkdir -p ../bin/x86_64-unknown-linux-gnu ../bin/aarch64-unknown-linux-gnu
+          cp target/x86_64-unknown-linux-gnu/release/stacks-node ../bin/x86_64-unknown-linux-gnu
+          cp target/aarch64-unknown-linux-gnu/release/stacks-node ../bin/aarch64-unknown-linux-gnu
+      - uses: actions/upload-artifact@v3
+        with:
+          name: stacks-node-bin
+          if-no-files-found: error
+          path: |
+            bin/*/stacks-node
+
+  build-push-docker:
+    needs: build-stacks-node
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - uses: actions/download-artifact@v3
+        with:
+          name: stacks-node-bin
+          path: docker/stacks-blockchain-binaries
+      - name: Process of downloaded artifacts
+        working-directory: docker/stacks-blockchain-binaries
+        run: |
+          ls -R
+          chmod +x x86_64-unknown-linux-gnu/stacks-node
+          chmod +x aarch64-unknown-linux-gnu/stacks-node
       - name: Create tag labels
         run: |
-          api_short=$(head -c 7 <<< "$API_GIT_COMMIT")
-          blockchain_short=$(head -c 7 <<< "$BLOCKCHAIN_GIT_COMMIT")
+          api_short=$(head -c 7 <<< "$STACKS_API_COMMIT")
+          blockchain_short=$(head -c 7 <<< "$STACKS_BLOCKCHAIN_COMMIT")
           echo "GIT_SHORTS=${api_short}-${blockchain_short}" >> $GITHUB_ENV
       - name: Docker meta
         id: meta
@@ -37,6 +121,10 @@ jobs:
         uses: docker/setup-qemu-action@v2
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
+        with:
+          config-inline: |
+            [worker.oci]
+              max-parallelism = 1
       - name: Login to DockerHub
         uses: docker/login-action@v2
         with:
@@ -46,13 +134,13 @@ jobs:
         uses: docker/build-push-action@v3
         with:
           file: standalone-regtest.Dockerfile
-          context: https://github.com/hirosystems/stacks-blockchain-api.git#feat/stacks-2.1-standalone:docker
+          context: ./docker
           push: true
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=registry,ref=zone117x/stacks-blockchain-api-standalone-regtest
           cache-to: type=inline
           build-args: |
-            API_GIT_COMMIT=${{ env.API_GIT_COMMIT }}
-            BLOCKCHAIN_GIT_COMMIT=${{ env.BLOCKCHAIN_GIT_COMMIT }}
+            API_GIT_COMMIT=${{ env.STACKS_API_COMMIT }}
+            BLOCKCHAIN_GIT_COMMIT=${{ env.STACKS_BLOCKCHAIN_COMMIT }}
